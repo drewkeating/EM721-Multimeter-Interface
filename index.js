@@ -1,13 +1,38 @@
 // em721.js  –  works with SerialPort v12.x or v14.x
 
-const { SerialPort } = require("serialport");
+const WebSocket = require("ws")
+const express = require("express")
+const http = require("http")
+const path = require("path")
+const { SerialPort } = require("serialport")
+const app = express()
+const server = http.createServer(app)
+const wss = new WebSocket.Server({ server })
+const clients = new Set();
 
 /* -------- configuration ------------------------------------------------- */
 const PORT = process.argv[2] || 'COM7';   // eg. '/dev/ttyUSB0' on Linux/Mac, 'COM4' on Windows
-const BAUD = 2400;
+const BAUD = 2400;  // eg. 110, 150, 300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
 /* ------------------------------------------------------------------------ */
 
-const port = new SerialPort({ path: PORT, baudRate: BAUD });
+// Set up the serial port
+const port = new SerialPort(
+  {
+      path: PORT,
+      baudRate: BAUD,
+      //dataBits: 8,
+      //stopBits: 1,
+      //Parity: 'none',
+      //flowControl: false
+  },
+  function (err) {
+      if (err) {
+        return console.error('Error: Serial Port Connection:', err.message);
+      }
+  },
+)
+
+
 const rxBuf = [];                           // running byte accumulator
 
 /* little helper ---------------------------------------------------------- */
@@ -121,26 +146,35 @@ function decodeFrame(pkt) {
     value /= 1000; unit = 'kHz';
   }
 
+  /* ----- math / peak / filter flags ---------------------------------- */
+const hold = (pkt[15] & 0x01) === 0x01;                  // HOLD
+const max  = pkt[17] === 0x01 && pkt[18] === 0x00;       // MAX
+const min  = pkt[17] === 0x02 && pkt[18] === 0x00;       // MIN
+const avg  = (pkt[14] & 0x10) === 0x10;                  // AVG
+
   /* ---------- K. flags --------------------------------------------- */
-  const sample = {
-    ts      : Date.now(),
+  const payload = {
+    ts      : Date.now(),  
     mode,
     unit,
     value,
     overflow,
-    hold    : !!(pkt[17] & 0x01),
+    hold: pkt[15] == 23 ? true : false,
+    //max,
+    //min,
+    avg,
+    view,
   };
 
-  console.log(sample);
+  //console.log(payload);
+
+  // Send data to all connected clients
+  for (let client of clients) {
+    client.send(JSON.stringify(payload));
+  }
 }
 
 /* -------------------------------------------------------------------- */
-
-// Handle errors
-port.on('error', (err) => {
-  console.error('Serial error:', err.message);
-});
-
 
 port.on('open', () => {
   console.log(`EM72: listening on ${PORT} @ ${BAUD} baud… (ctrl-C to quit)`);
@@ -151,7 +185,7 @@ port.on('close', () => {
   console.error(`Serial disconnected on port: ${PORT}`);
   open(); // reopen 
 });
-
+open(); // reopen on server start
 
 
 function open () {
@@ -163,3 +197,58 @@ function open () {
       setTimeout(open, 2000); // next attempt to open after 10s
   });
 }
+
+
+
+
+
+
+
+
+
+
+
+
+var view = 'main';
+
+// Serve the client page
+app.use(express.static("public"));
+
+// for api calls
+app.get("/actions/set_view", (req, res) => {
+  res.send('GET request recieved');
+  view = req.query.view
+  console.log(req.query.view);
+})
+
+// Handle websocket client connection
+wss.on("connection", (ws) => {
+  console.log("Client connected");
+  clients.add(ws);
+  
+  // // Main event loop, constantly send data to client side on a regular timer
+  // // Note: This is optimistic in 100ms deliverability - we don't have a guarantee that all [6] data points
+  // // have been updated since last request, this depends on bandwidth of serial data - we are being optimistic
+  // const timer = setInterval(() => {
+  //   // Send data to all connected clients, at every interval, steady stream of data sent to clients
+  //   for (let client of clients) {
+  //     client.send(JSON.stringify(payload));
+  //   }
+  // }, 100); // decide appropriate duration for UI refresh rate. Websockets are fast
+
+  // Cleanup on socket close
+  ws.on("close", () => {
+    console.log("Client disconnected");
+    //clearInterval(timer);
+    clients.delete(ws);
+  });
+});
+
+// Listen on port
+server.listen(3000, () => {
+  console.log("Server running on http://localhost:3000");
+});
+
+
+
+
